@@ -1,0 +1,14 @@
+{
+  "geode": "5.1.0",
+  "gd": {
+    "win": "2.2081",
+    "android": "2.2081",
+    "mac": "2.2081",
+    "ios": "2.2081"
+  },
+  "id": "slgman.qoi-cache",
+  "name": "QOI Cache",
+  "version": "v1.0.0",
+  "developer": "slgman",
+  "description": "Reduces Geometry Dash loading times by approximately 48% by caching images in the high-speed QOI format."
+}
