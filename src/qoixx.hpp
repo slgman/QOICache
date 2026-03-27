@@ -604,7 +604,7 @@ class qoi{
 
     push<sizeof(padding)>(p_, padding);
   }
-#elif defined(__ARM_NEON)
+#elif defined(__ARM_NEON) && defined(__aarch64__)
   template<bool Alpha>
   using pixels_type = std::conditional_t<Alpha, uint8x16x4_t, uint8x16x3_t>;
   template<bool Alpha>
