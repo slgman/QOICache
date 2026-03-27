@@ -1,27 +1,3 @@
-// MIT License
-//
-// Copyright (c) 2022 I
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-
-// https://github.com/wx257osn2/qoixx
-
 #ifndef QOIXX_HPP_INCLUDED_
 #define QOIXX_HPP_INCLUDED_
 
@@ -35,12 +11,13 @@
 #include<bit>
 #include<numeric>
 #include<array>
+#include<utility>
 
 #ifndef QOIXX_NO_SIMD
 #if defined(__ARM_FEATURE_SVE)
 #include<arm_sve.h>
 #include<arm_neon.h>
-#elif defined(__ARM_NEON)
+#elif defined(__aarch64__)
 #include<arm_neon.h>
 #elif defined(__AVX2__)
 #include<immintrin.h>
@@ -50,6 +27,22 @@
 namespace qoixx{
 
 namespace detail{
+
+template<typename T>
+requires(sizeof(T) == 1 && !std::same_as<T, bool>)
+struct contiguous_puller{
+  static constexpr bool is_contiguous = true;
+  const T* t;
+  inline std::uint8_t pull()noexcept{
+    return static_cast<std::uint8_t>(*t++);
+  }
+  inline const std::uint8_t* raw_pointer()noexcept{
+    return reinterpret_cast<const std::uint8_t*>(t);
+  }
+  inline void advance(std::size_t n)noexcept{
+    t += n;
+  }
+};
 
 template<typename T>
 struct default_container_operator;
@@ -88,19 +81,7 @@ struct default_container_operator<std::vector<T, A>>{
   static constexpr pusher create_pusher(target_type& t)noexcept{
     return {&t};
   }
-  struct puller{
-    static constexpr bool is_contiguous = true;
-    const T* t;
-    inline std::uint8_t pull()noexcept{
-      return static_cast<std::uint8_t>(*t++);
-    }
-    inline const std::uint8_t* raw_pointer()noexcept{
-      return reinterpret_cast<const std::uint8_t*>(t);
-    }
-    inline void advance(std::size_t n)noexcept{
-      t += n;
-    }
-  };
+  using puller = contiguous_puller<T>;
   static constexpr puller create_puller(const target_type& t)noexcept{
     return {t.data()};
   }
@@ -143,19 +124,7 @@ struct default_container_operator<std::pair<std::unique_ptr<T[]>, std::size_t>>{
   static constexpr pusher create_pusher(target_type& t)noexcept{
     return {&t};
   }
-  struct puller{
-    static constexpr bool is_contiguous = true;
-    const T* t;
-    inline std::uint8_t pull()noexcept{
-      return static_cast<std::uint8_t>(*t++);
-    }
-    inline const std::uint8_t* raw_pointer()noexcept{
-      return reinterpret_cast<const std::uint8_t*>(t);
-    }
-    inline void advance(std::size_t n)noexcept{
-      t += n;
-    }
-  };
+  using puller = contiguous_puller<T>;
   static constexpr puller create_puller(const target_type& t)noexcept{
     return {t.first.get()};
   }
@@ -171,19 +140,7 @@ template<typename T>
 requires(sizeof(T) == 1)
 struct default_container_operator<std::pair<T*, std::size_t>>{
   using target_type = std::pair<T*, std::size_t>;
-  struct puller{
-    static constexpr bool is_contiguous = true;
-    const T* ptr;
-    inline std::uint8_t pull()noexcept{
-      return static_cast<std::uint8_t>(*ptr++);
-    }
-    inline const std::uint8_t* raw_pointer()noexcept{
-      return reinterpret_cast<const std::uint8_t*>(ptr);
-    }
-    inline void advance(std::size_t n)noexcept{
-      ptr += n;
-    }
-  };
+  using puller = contiguous_puller<T>;
   static constexpr puller create_puller(const target_type& t)noexcept{
     return {t.first};
   }
@@ -292,6 +249,19 @@ class qoi{
   };
   struct rgb_t{
     std::uint8_t r, g, b;
+    inline std::uint32_t v()const{
+      static_assert(sizeof(rgb_t) == 3u);
+      if constexpr(std::endian::native == std::endian::little){
+        std::uint32_t x = 255u << 24u;
+        efficient_memcpy<3>(&x, this);
+        return x;
+      }
+      else
+        return std::uint32_t{r}       |
+               std::uint32_t{g} <<  8 |
+               std::uint32_t{b} << 16 |
+                           255u << 24;
+    }
     inline std::uint_fast32_t hash()const{
       static constexpr std::uint64_t constant =
         static_cast<std::uint64_t>(3u) << 56 |
@@ -309,7 +279,7 @@ class qoi{
       return ((this->r^rhs.r)|(this->g^rhs.g)|(this->b^rhs.b)) == 0;
     }
   };
-  static constexpr std::uint32_t magic =
+  static constexpr std::uint32_t magic = 
     113u /*q*/ << 24 | 111u /*o*/ << 16 | 105u /*i*/ <<  8 | 102u /*f*/ ;
   static constexpr std::size_t header_size =
     sizeof(magic) +
@@ -346,12 +316,29 @@ class qoi{
     }
   }
  private:
+  template<bool Alpha>
+  using local_rgba_pixel_t = std::conditional_t<Alpha, rgba_t, rgb_t>;
+  template<bool Alpha>
+  static constexpr local_rgba_pixel_t<Alpha> default_pixel()noexcept{
+    if constexpr(Alpha)
+      return {0, 0, 0, 255};
+    else
+      return {};
+  }
+  template<bool Alpha>
+  struct local_pixel{
+    std::uint8_t rgb = static_cast<std::uint8_t>(chunk_tag::rgb);
+    local_rgba_pixel_t<Alpha> v;
+  };
+  static_assert(std::has_unique_object_representations_v<local_pixel<true>> and std::has_unique_object_representations_v<local_pixel<false>>);
   template<std::uint_fast8_t Channels, typename Pusher, typename Puller>
-  static inline void encode_body(Pusher& p, Puller& pixels, rgba_t (&index)[index_size], std::size_t px_len, rgba_t px_prev = {0, 0, 0, 255}, std::uint8_t prev_hash = static_cast<std::uint8_t>(index_size), std::size_t run = 0){
-    const auto f = [&run, &index, &p, &prev_hash](rgba_t px, rgba_t px_prev){
-      if(px == px_prev){
+  static inline void encode_body(Pusher& p, Puller& pixels, rgba_t (&index)[index_size], std::size_t px_len, local_rgba_pixel_t<Channels == 4u> px_prev = default_pixel<Channels == 4u>(), std::uint8_t prev_hash = static_cast<std::uint8_t>(index_size), std::size_t run = 0){
+    local_pixel<Channels == 4u> px;
+    while(px_len--)[[likely]]{
+      pull<Channels>(&px.v, pixels);
+      if(px.v.v() == px_prev.v()){
         ++run;
-        return;
+        continue;
       }
       if(run > 0){
         while(run >= 62)[[unlikely]]{
@@ -372,57 +359,55 @@ class qoi{
         }
       }
 
-      const auto index_pos = px.hash() % index_size;
+      const auto index_pos = px.v.hash() % index_size;
       prev_hash = index_pos;
 
-      if(index[index_pos] == px){
-        p.push(chunk_tag::index | index_pos);
-        return;
-      }
-      index[index_pos] = px;
-
-      if constexpr(Channels == 4)
-        if(px.a != px_prev.a){
-          p.push(chunk_tag::rgba);
-          push<4>(p, &px);
-          return;
+      do{
+        if(index[index_pos].v() == px.v.v()){
+          p.push(chunk_tag::index | index_pos);
+          break;
         }
-      const auto vr = static_cast<int>(px.r) - static_cast<int>(px_prev.r) + 2;
-      const auto vg = static_cast<int>(px.g) - static_cast<int>(px_prev.g) + 2;
-      const auto vb = static_cast<int>(px.b) - static_cast<int>(px_prev.b) + 2;
+        efficient_memcpy<Channels>(index + index_pos, &px.v);
+        if constexpr(Channels == 3)
+          index[index_pos].a = 255u;
 
-      if(const std::uint8_t v = vr|vg|vb; v < 4){
-        p.push(chunk_tag::diff | vr << 4 | vg << 2 | vb);
-        return;
-      }
-      const auto vg_r = vr - vg + 8;
-      const auto vg_b = vb - vg + 8;
-      if(const int v = vg_r|vg_b, g = vg+30; ((v&0xf0)|(g&0xc0)) == 0){
-        p.push(chunk_tag::luma | g);
-        p.push(vg_r << 4 | vg_b);
-      }
-      else{
-        p.push(chunk_tag::rgb);
-        push<3>(p, &px);
-      }
-    };
-    auto px = px_prev;
-    while(px_len--)[[likely]]{
-      px_prev = px;
-      pull<Channels>(&px, pixels);
-      f(px, px_prev);
+        if constexpr(Channels == 4)
+          if(px.v.a != px_prev.a){
+            p.push(chunk_tag::rgba);
+            push<4>(p, &px.v);
+            break;
+          }
+        const auto vg_2 = static_cast<int>(px.v.g) - static_cast<int>(px_prev.g);
+        if(const std::uint8_t g = vg_2+32; g < 64){
+          const auto vr = static_cast<int>(px.v.r) - static_cast<int>(px_prev.r) + 2;
+          const auto vg = vg_2 + 2;
+          const auto vb = static_cast<int>(px.v.b) - static_cast<int>(px_prev.b) + 2;
+
+          if(static_cast<std::uint8_t>(vr|vg|vb) < 4){
+            p.push(chunk_tag::diff | vr << 4 | vg << 2 | vb);
+            break;
+          }
+          const auto vg_r = vr - vg + 8;
+          const auto vg_b = vb - vg + 8;
+          if(static_cast<std::uint8_t>(vg_r|vg_b) < 16){
+            p.push(chunk_tag::luma | g);
+            p.push(vg_r << 4 | vg_b);
+          }
+          else
+            push<4>(p, &px);
+        }
+        else
+          push<4>(p, &px);
+      }while(false);
+      efficient_memcpy<Channels>(&px_prev, &px.v);
     }
-    if(px == px_prev){
-      while(run >= 62)[[unlikely]]{
-        static constexpr std::uint8_t x = chunk_tag::run | 61;
-        p.push(x);
-        run -= 62;
-      }
-      if(run > 0){
-        p.push(chunk_tag::run | (run-1));
-        run = 0;
-      }
+    while(run >= 62)[[unlikely]]{
+      static constexpr std::uint8_t x = chunk_tag::run | 61;
+      p.push(x);
+      run -= 62;
     }
+    if(run > 0)
+      p.push(chunk_tag::run | (run-1));
   }
 #ifndef QOIXX_NO_SIMD
 #if defined(__ARM_FEATURE_SVE)
@@ -532,12 +517,12 @@ class qoi{
         hash = svand_n_u8_x(mask, svadd_u8_x(mask, svadd_u8_x(mask, svmul_n_u8_x(mask, get<0>(pxs), 3), svmul_n_u8_x(mask, get<1>(pxs), 5)), svadd_u8_x(mask, svmul_n_u8_x(mask, get<2>(pxs), 7), svmul_n_u8_x(mask, get<3>(pxs), 11))), 63);
       else
         hash = svand_n_u8_x(mask, svadd_u8_x(mask, svadd_u8_x(mask, svmul_n_u8_x(mask, get<0>(pxs), 3), svmul_n_u8_x(mask, get<1>(pxs), 5)), svadd_n_u8_x(mask, svmul_n_u8_x(mask, get<2>(pxs), 7), static_cast<std::uint8_t>(255*11))), 63);
-      std::uint8_t runs[SVERegisterSize/8], diffs[SVERegisterSize/8], lus[SVERegisterSize/8], mas[SVERegisterSize/8], hashs[SVERegisterSize/8];
+      std::uint8_t runs[SVERegisterSize/8], diffs[SVERegisterSize/8], lumas[SVERegisterSize/8*2], hashs[SVERegisterSize/8];
       [[maybe_unused]] std::uint8_t alphas[SVERegisterSize/8];
       svst1_u8(mask, runs, svadd_n_u8_m(runv, zero, 1));
       svst1_u8(mask, diffs, diffv);
-      svst1_u8(mask, lus, lu);
-      svst1_u8(mask, mas, ma);
+      const auto luma = svcreate2_u8(lu, ma);
+      svst2_u8(mask, lumas, luma);
       svst1_u8(mask, hashs, hash);
       if constexpr(Alpha)
         if(!alpha)
@@ -578,9 +563,9 @@ class qoi{
           }
         if(diffs[i])
           *p++ = diffs[i];
-        else if(lus[i]){
-          *p++ = lus[i];
-          *p++ = mas[i];
+        else if(lumas[i*2]){
+          std::memcpy(p, lumas + i*2, 2);
+          p += 2;
         }
         else{
           *p++ = chunk_tag::rgb;
@@ -604,7 +589,7 @@ class qoi{
 
     push<sizeof(padding)>(p_, padding);
   }
-#elif defined(__ARM_NEON) && defined(__aarch64__)
+#elif defined(__aarch64__)
   template<bool Alpha>
   using pixels_type = std::conditional_t<Alpha, uint8x16x4_t, uint8x16x3_t>;
   template<bool Alpha>
@@ -699,12 +684,11 @@ class qoi{
         hash = vandq_u8(vaddq_u8(vaddq_u8(vmulq_u8(pxs.val[0], vdupq_n_u8(3)), vmulq_u8(pxs.val[1], vdupq_n_u8(5))), vaddq_u8(vmulq_u8(pxs.val[2], vdupq_n_u8(7)), vmulq_u8(pxs.val[3], vdupq_n_u8(11)))), vdupq_n_u8(63));
       else
         hash = vandq_u8(vaddq_u8(vaddq_u8(vmulq_u8(pxs.val[0], vdupq_n_u8(3)), vmulq_u8(pxs.val[1], vdupq_n_u8(5))), vaddq_u8(vmulq_u8(pxs.val[2], vdupq_n_u8(7)), vdupq_n_u8(static_cast<std::uint8_t>(255*11)))), vdupq_n_u8(63));
-      std::uint8_t runs[simd_lanes], diffs[simd_lanes], lus[simd_lanes], mas[simd_lanes], hashs[simd_lanes];
+      std::uint8_t runs[simd_lanes], diffs[simd_lanes], lumas[simd_lanes*2], hashs[simd_lanes];
       [[maybe_unused]] std::uint8_t alphas[simd_lanes];
       vst1q_u8(runs, runv);
       vst1q_u8(diffs, diffv);
-      vst1q_u8(lus, lu);
-      vst1q_u8(mas, ma);
+      vst2q_u8(lumas, (uint8x16x2_t{lu, ma}));
       vst1q_u8(hashs, hash);
       if constexpr(Alpha)
         if(!alpha)
@@ -745,9 +729,9 @@ class qoi{
           }
         if(diffs[i])
           *p++ = diffs[i];
-        else if(lus[i]){
-          *p++ = lus[i];
-          *p++ = mas[i];
+        else if(lumas[i*2]){
+          std::memcpy(p, lumas + i*2, 2);
+          p += 2;
         }
         else{
           *p++ = chunk_tag::rgb;
@@ -759,7 +743,13 @@ class qoi{
     }
     p_.advance(p-p_.raw_pointer());
 
-    encode_body<Channels>(p_, pixels_, index, px_len, px, prev_hash, run);
+    if constexpr(Alpha)
+      encode_body<Channels>(p_, pixels_, index, px_len, px, prev_hash, run);
+    else{
+      rgb_t px_prev;
+      efficient_memcpy<3>(&px_prev, &px);
+      encode_body<Channels>(p_, pixels_, index, px_len, px_prev, prev_hash, run);
+    }
 
     push<sizeof(padding)>(p_, padding);
   }
@@ -964,19 +954,20 @@ class qoi{
       diff.val[0] = _mm256_add_epi8(_mm256_sub_epi8(diff.val[0], diff.val[1]), eight);
       diff.val[2] = _mm256_add_epi8(_mm256_sub_epi8(diff.val[2], diff.val[1]), eight);
       diff.val[1] = _mm256_add_epi8(diff.val[1], _mm256_set1_epi8(30));
-      const auto lu = _mm256_and_si256(_mm256_or_si256(_mm256_set1_epi8(static_cast<char>(chunk_tag::luma)), diff.val[1]), _mm256_cmpeq_epi8(_mm256_or_si256(_mm256_and_si256(_mm256_or_si256(diff.val[0], diff.val[2]), _mm256_set1_epi8(static_cast<char>(0xf0))), _mm256_and_si256(diff.val[1], _mm256_set1_epi8(static_cast<char>(0xc0)))), zero));
-      const auto ma = _mm256_or_si256(slli_epi8<4>(diff.val[0]), diff.val[2]);
+      const auto luma_mask = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+      const auto lu = _mm256_permutevar8x32_epi32(_mm256_and_si256(_mm256_or_si256(_mm256_set1_epi8(static_cast<char>(chunk_tag::luma)), diff.val[1]), _mm256_cmpeq_epi8(_mm256_or_si256(_mm256_and_si256(_mm256_or_si256(diff.val[0], diff.val[2]), _mm256_set1_epi8(static_cast<char>(0xf0))), _mm256_and_si256(diff.val[1], _mm256_set1_epi8(static_cast<char>(0xc0)))), zero)), luma_mask);
+      const auto ma = _mm256_permutevar8x32_epi32(_mm256_or_si256(slli_epi8<4>(diff.val[0]), diff.val[2]), luma_mask);
       __m256i hash;
       if constexpr(Alpha)
         hash = _mm256_and_si256(_mm256_add_epi8(_mm256_add_epi8(mul_epi8<3>(pxs.val[0]), mul_epi8<5>(pxs.val[1])), _mm256_add_epi8(mul_epi8<7>(pxs.val[2]), mul_epi8<11>(pxs.val[3]))), _mm256_set1_epi8(63));
       else
         hash = _mm256_and_si256(_mm256_add_epi8(_mm256_add_epi8(mul_epi8<3>(pxs.val[0]), mul_epi8<5>(pxs.val[1])), _mm256_add_epi8(mul_epi8<7>(pxs.val[2]), _mm256_set1_epi8(static_cast<std::uint8_t>(255*11)))), _mm256_set1_epi8(63));
-      alignas(alignof(__m256i)) std::uint8_t runs[simd_lanes], diffs[simd_lanes], lus[simd_lanes], mas[simd_lanes], hashs[simd_lanes];
+      alignas(alignof(__m256i)) std::uint8_t runs[simd_lanes], diffs[simd_lanes], lumas[simd_lanes*2], hashs[simd_lanes];
       [[maybe_unused]] alignas(alignof(__m256i)) std::uint8_t alphas[simd_lanes];
       _mm256_store_si256(reinterpret_cast<__m256i*>(runs), runv);
       _mm256_store_si256(reinterpret_cast<__m256i*>(diffs), diffv);
-      _mm256_store_si256(reinterpret_cast<__m256i*>(lus), lu);
-      _mm256_store_si256(reinterpret_cast<__m256i*>(mas), ma);
+      _mm256_store_si256(reinterpret_cast<__m256i*>(lumas), _mm256_unpacklo_epi8(lu, ma));
+      _mm256_store_si256(reinterpret_cast<__m256i*>(lumas)+1, _mm256_unpackhi_epi8(lu, ma));
       _mm256_store_si256(reinterpret_cast<__m256i*>(hashs), hash);
       if constexpr(Alpha)
         if(!alpha)
@@ -1017,9 +1008,9 @@ class qoi{
           }
         if(diffs[i])
           *p++ = diffs[i];
-        else if(lus[i]){
-          *p++ = lus[i];
-          *p++ = mas[i];
+        else if(lumas[i*2]){
+          std::memcpy(p, lumas + i*2, 2);
+          p += 2;
         }
         else{
           *p++ = chunk_tag::rgb;
@@ -1031,7 +1022,13 @@ class qoi{
     }
     p_.advance(p-p_.raw_pointer());
 
-    encode_body<Channels>(p_, pixels_, index, px_len, px, prev_hash, run);
+    if constexpr(Alpha)
+      encode_body<Channels>(p_, pixels_, index, px_len, px, prev_hash, run);
+    else{
+      rgb_t px_prev;
+      efficient_memcpy<3>(&px_prev, &px);
+      encode_body<Channels>(p_, pixels_, index, px_len, px_prev, prev_hash, run);
+    }
 
     push<sizeof(padding)>(p_, padding);
   }
@@ -1082,19 +1079,19 @@ class qoi{
       constexpr std::uint32_t mask_tail_4 = 0b0000'1111u;
       const auto vr = (i >> 4);
       const auto vb = (i & mask_tail_4);
-      table[i] = vr*3 + vb*7;
+      table[i] = (vr*3 + vb*7) % index_size;
     }
     for(std::size_t i = chunk_tag::diff; i < chunk_tag::luma; ++i){
       constexpr std::uint32_t mask_tail_2 = 0b0000'0011u;
-      const auto vr = ((i >> 4) & mask_tail_2) - 2;
-      const auto vg = ((i >> 2) & mask_tail_2) - 2;
-      const auto vb = ( i       & mask_tail_2) - 2;
-      table[i+hash_table_offset] = vr*3 + vg*5 + vb*7;
+      const auto vr = static_cast<int>((i >> 4) & mask_tail_2) - 2;
+      const auto vg = static_cast<int>((i >> 2) & mask_tail_2) - 2;
+      const auto vb = static_cast<int>( i       & mask_tail_2) - 2;
+      table[i+hash_table_offset] = static_cast<std::uint8_t>((vr*3 + vg*5 + vb*7) % index_size);
     }
     for(std::size_t i = chunk_tag::luma; i < chunk_tag::run; ++i){
         constexpr int vgv = chunk_tag::luma+40;
         const int vg = i - vgv;
-        table[i+hash_table_offset] = vg*3 + (vg+8)*5 + vg*7;
+        table[i+hash_table_offset] = static_cast<std::uint8_t>((vg*3 + (vg+8)*5 + vg*7) % index_size);
     }
     return table;
   }
@@ -1104,8 +1101,8 @@ class qoi{
       constexpr std::uint32_t mask_tail_4 = 0b0000'1111u;
       const auto vr = (i >> 4);
       const auto vb = (i & mask_tail_4);
-      table[i][0] = (uint8_t)vr;
-      table[i][1] = (uint8_t)vb;
+      table[i][0] = static_cast<uint8_t>(vr);
+      table[i][1] = static_cast<uint8_t>(vb);
     }
     return table;
   }
@@ -1116,9 +1113,9 @@ class qoi{
       const auto vr = ((i >> 4) & mask_tail_2) - 2;
       const auto vg = ((i >> 2) & mask_tail_2) - 2;
       const auto vb = ( i       & mask_tail_2) - 2;
-      table[i][0] = (uint8_t)vr;
-      table[i][1] = (uint8_t)vg;
-      table[i][2] = (uint8_t)vb;
+      table[i][0] = static_cast<uint8_t>(vr);
+      table[i][1] = static_cast<uint8_t>(vg);
+      table[i][2] = static_cast<uint8_t>(vb);
     }
     return table;
   }
@@ -1133,8 +1130,12 @@ class qoi{
     if constexpr(std::is_same<rgba_t, qoi::rgba_t>::value)
       px.a = 255;
     rgba_t index[index_size];
-    if constexpr(std::is_same<rgba_t, qoi::rgba_t>::value)
+    if constexpr(std::is_same<rgba_t, qoi::rgba_t>::value){
       index[(0*3+0*5+0*7+0*11)%index_size] = {};
+      index[(0*3+0*5+0*7+255*11)%index_size] = px;
+    }
+    else
+      index[(0*3+0*5+0*7+255*11)%index_size] = {};
 
 #if QOIXX_DECODE_WITH_TABLES
 #define QOIXX_HPP_WITH_TABLES(...) __VA_ARGS__
@@ -1151,13 +1152,10 @@ class qoi{
     )
 
     const auto f = [&pixels, &p, &px_len, &size, &px, &index QOIXX_HPP_WITH_TABLES(, &hash)]{
-      static constexpr std::uint32_t mask_tail_6 = 0b0011'1111u;
-      [[maybe_unused]] static constexpr std::uint32_t mask_tail_4 = 0b0000'1111u;
-      [[maybe_unused]] static constexpr std::uint32_t mask_tail_2 = 0b0000'0011u;
       const auto b1 = p.pull();
       --size;
 
-#if defined(__ARM_NEON) and not defined(QOIXX_NO_SIMD)
+#if defined(__aarch64__) and not defined(QOIXX_NO_SIMD)
 #define QOIXX_HPP_DECODE_RUN(px, run) { \
     if constexpr(Pusher::is_contiguous){ \
       ++run; \
@@ -1186,6 +1184,7 @@ class qoi{
       if(b1 >= chunk_tag::run){
         if(b1 < chunk_tag::rgb){
           /*run*/
+          static constexpr std::uint32_t mask_tail_6 = 0b0011'1111u;
           std::size_t run = b1 & mask_tail_6;
           if(run >= px_len)[[unlikely]]
             run = px_len;
@@ -1240,6 +1239,7 @@ class qoi{
         px.b += vg + drb[1];
         hash = (static_cast<int>(hash)+hash_diff_table[b1]+luma_hash_diff_table[b2]) % index_size;
         ) QOIXX_HPP_WITHOUT_TABLES(
+        static constexpr std::uint32_t mask_tail_4 = 0b0000'1111u;
         px.r += vg + (b2 >> 4);
         px.g += vg + 8;
         px.b += vg + (b2 & mask_tail_4);
@@ -1249,12 +1249,13 @@ class qoi{
         /*diff*/
         QOIXX_HPP_WITH_TABLES(
         static constexpr auto table = create_diff_table();
-        const auto drgb = table[b1];\
+        const auto drgb = table[b1];
         px.r += drgb[0];
         px.g += drgb[1];
         px.b += drgb[2];
         hash = (static_cast<int>(hash)+hash_diff_table[b1]) % index_size;
         ) QOIXX_HPP_WITHOUT_TABLES(
+        static constexpr std::uint32_t mask_tail_2 = 0b0000'0011u;
         px.r += ((b1 >> 4) & mask_tail_2) - 2;
         px.g += ((b1 >> 2) & mask_tail_2) - 2;
         px.b += ( b1       & mask_tail_2) - 2;
@@ -1334,7 +1335,7 @@ class qoi{
 #undef QOIXX_HPP_SVE_REGISTER_SIZE_SWITCH_CASE
 #undef QOIXX_HPP_SVE_REGISTER_SIZE_SWITCH
     else
-#elif defined(__ARM_NEON)
+#elif defined(__aarch64__)
     if constexpr(coT::pusher::is_contiguous && coU::puller::is_contiguous)
       if(desc.channels == 4)
         encode_neon<4>(p, puller, desc);
