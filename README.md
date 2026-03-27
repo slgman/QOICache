@@ -4,6 +4,14 @@ A Geometry Dash modification designed to significantly reduce game loading times
 
 ## Performance Results
 
+Without mod
+
+https://github.com/user-attachments/assets/ecdca0a1-cadc-4ac8-a3a3-bdf016eb0e3a
+
+With mod
+
+https://github.com/user-attachments/assets/c13ef1e4-0a48-4700-aefb-cff3af78a64a
+
 By bypassing standard image decoding and utilizing the QOI format, the resource loading phase is optimized as follows:
 
 | State        | Loading Time |  Improvement |
